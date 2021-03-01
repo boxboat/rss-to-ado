@@ -18,6 +18,7 @@ azure_devops_project = os.getenv('AZURE_DEVOPS_PROJECT')
 azure_devops_epic_url = os.getenv('AZURE_DEVOPS_EPIC_URL')
 azure_devops_area_path = os.getenv('AZURE_DEVOPS_AREA_PATH')
 azure_devops_tags = os.getenv('AZURE_DEVOPS_TAGS')
+db_path = os.getenv('DB_PATH')
 
 
 def init_ado() -> WorkItemTrackingClient:
