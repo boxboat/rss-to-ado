@@ -3,7 +3,6 @@ import feedparser
 import os
 import sqlite3
 import time
-
 from azure.devops.connection import Connection
 from azure.devops.v6_0.work_item_tracking.models import JsonPatchOperation
 from azure.devops.v6_0.work_item_tracking.models import WorkItemRelation
@@ -25,7 +24,6 @@ def init_ado() -> WorkItemTrackingClient:
     credentials = BasicAuthentication('', azure_devops_pat)
     connection = Connection(base_url=azure_devops_url, creds=credentials)
     work_item_tracking_client = connection.clients.get_work_item_tracking_client()
-
     return work_item_tracking_client
 
 
@@ -41,41 +39,73 @@ def set_field(document, field, value):
         value=value))
 
 
+def exists_in_db(c: sqlite3.Cursor, guid: str) -> bool:
+    c.execute("SELECT COUNT(*) FROM items WHERE guid = ?", (guid,))
+    return c.fetchone()[0] > 0
+
+
+def insert_in_db(c: sqlite3.Cursor, guid: str, timestamp: float):
+    c.execute("INSERT INTO items (guid, timestamp) VALUES (?, ?)",
+              (guid, timestamp,))
+
+
+def create_work_item(ado_client: WorkItemTrackingClient, parent_url: str, area_path: str,
+                     title: str, desc: str, tags: str, item_type: str = "User Story"):
+    document = []
+    set_field(document, "/fields/System.Title", title)
+    set_field(document, "/fields/System.AreaPath", area_path)
+    set_field(document, "/fields/System.Description", desc)
+    set_field(document, "/fields/System.Tags", tags)
+    set_field(document, "/relations/-", WorkItemRelation(
+        rel="System.LinkTypes.Hierarchy-Reverse",
+        url=parent_url,
+        attributes={
+            "name": "Parent",
+        }
+    ))
+    return ado_client.create_work_item(document, azure_devops_project, item_type)
+
+
 def main():
     db_conn = sqlite3.connect('feed.db')
     init_db(db_conn)
     work_item_tracking_client = init_ado()
     db_cursor = db_conn.cursor()
-
-    # 4 weeks
-    days_to_include = 4 * 7
+    # How far back to look for new events
+    days_to_include = 2 * 7
     start_datetime = datetime.datetime.today() - datetime.timedelta(days=days_to_include)
     print(f"Start Date: {start_datetime}")
-
     feed_data = feedparser.parse(feed_url)
+    curtime = datetime.datetime.now().strftime('%m/%d/%Y')
+    f_resp = create_work_item(ado_client=work_item_tracking_client, parent_url=azure_devops_epic_url,
+                              tags=azure_devops_tags, desc=f'Evaluate new Azure features - {curtime}',
+                              area_path=azure_devops_area_path, title=f'Evaluate new Azure Features - {curtime}',
+                              item_type="Feature")
+    feature_url = f_resp.url
 
     for index, item in enumerate(feed_data.entries):
         published_datetime = datetime.datetime.fromtimestamp(time.mktime(item.published_parsed))
-
         if published_datetime < start_datetime:
             continue
-
-        # See if item exists
-        db_cursor.execute("SELECT COUNT(*) FROM items WHERE guid = ?", (item.id, ))
-
-        db_count_result = db_cursor.fetchone()
-        db_count = db_count_result[0]
-
-        # Skip if item exists
-        if db_count > 0:
+        elif exists_in_db(c=db_cursor, guid=item.id):
             continue
+        try:
+            resp = create_work_item(ado_client=work_item_tracking_client, parent_url=feature_url,
+                                    area_path=azure_devops_area_path, title=f'{item.title}', tags=azure_devops_tags,
+                                    desc=f"{item.description}<br />\n<br />\n<a href=\"{item.link}\">Source</a>")
+            print("User Story Response:")
+            print(resp)
+            print("")
+            print(f"User Story ID: {resp.id}")
+            print("")
+        except Exception as err:
+            print(f'Failed to add item {item.title}')
+            exit(1)
 
-        db_cursor.execute("INSERT INTO items (guid, timestamp) VALUES (?, ?)",
-                          (item.id, published_datetime.timestamp(), ))
+        insert_in_db(c=db_cursor, guid=item.id, timestamp=published_datetime.timestamp())
         db_conn.commit()
 
         print(f"Item inserted: {item.title}")
-
         print(f"Item:    {index}")
         print(f"Title:   {item.title}")
         print(f"Date:    {item.published}")
@@ -83,37 +113,6 @@ def main():
         print(f"Desc:    {item.description}")
         print(f"Link:    {item.link}")
         print(f"GUID:    {item.id}")
-        print("")
-        print("")
-
-        document = []
-
-        set_field(document, "/fields/System.Title",         f"{item.title}")
-        set_field(document, "/fields/System.AreaPath",      azure_devops_area_path)
-
-        set_field(
-            document,
-            "/fields/System.Description",
-            f"{item.description}<br />\n<br />\n<a href=\"{item.link}\">Source</a>"
-        )
-
-        set_field(document, "/fields/System.Tags",          azure_devops_tags)
-
-        set_field(document, "/relations/-", WorkItemRelation(
-            rel="System.LinkTypes.Hierarchy-Reverse",
-            url=azure_devops_epic_url,
-            attributes={
-                "name": "Parent",
-            }
-        ))
-
-        user_story_response = work_item_tracking_client.create_work_item(
-            document, azure_devops_project, "User Story")
-
-        print("User Story Response:")
-        print(user_story_response)
-        print("")
-        print(f"User Story ID: {user_story_response.id}")
         print("")
         print("")
 
